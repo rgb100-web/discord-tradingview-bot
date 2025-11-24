@@ -95,4 +95,106 @@ Payload:
         except Exception:
             log.warning("⚠ Fast model returned non-JSON — proceeding anyway")
 
-        # -
+        # ---- DEEP ANALYSIS ----
+        deep_prompt = f"""
+You are a professional trading analyst.
+
+Evaluate the trade:
+- Trend alignment
+- Divergences
+- Volume confirmation
+- A+ setups only
+- Risk/reward >= 1:3
+- Clean entry, stop, and 1–2 targets
+- Probability of success (0-100)
+
+Return ONLY JSON:
+{{
+  "symbol": "",
+  "action": "suggest" or "reject",
+  "side": "long" or "short",
+  "probability": 0-100,
+  "entry": float,
+  "stop": float,
+  "targets": [float, float?],
+  "notes": ""
+}}
+
+Payload:
+{json.dumps(payload)}
+"""
+        deep_result = await self._call_openai(DEEP_MODEL, deep_prompt)
+
+        try:
+            final_json = json.loads(deep_result)
+            return final_json
+        except Exception:
+            log.warning("⚠ Deep model returned non-JSON — using fallback")
+            price = payload.get("price", 0)
+            atr = payload.get("atr", 1)
+
+            return {
+                "symbol": payload.get("symbol", "?"),
+                "action": "suggest",
+                "side": "long",
+                "probability": 60,
+                "entry": price,
+                "stop": round(price - atr * 1.5, 2),
+                "targets": [round(price + atr * 4.5, 2)],
+                "notes": "Fallback used — model returned non-JSON"
+            }
+
+
+    async def _call_openai(self, model: str, prompt: str) -> str:
+        """Send a chat completion request to OpenAI."""
+        url = "https://api.openai.com/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {OPENAI_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        body = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": "You are an ultra-precise trading signal engine."},
+                {"role": "user", "content": prompt}
+            ],
+            "temperature": 0.05,
+            "max_tokens": 800
+        }
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, headers=headers, json=body) as resp:
+                r = await resp.json()
+                return r["choices"][0]["message"]["content"]
+
+
+    async def post_to_discord(self, result: dict):
+        """Send formatted AI output to configured Discord channel."""
+        if not self.bot or not self.channel_id:
+            log.warning("⚠ No bot or channel configured")
+            print(result)
+            return
+
+        channel = self.bot.get_channel(self.channel_id)
+        if channel is None:
+            try:
+                channel = await self.bot.fetch_channel(self.channel_id)
+            except Exception:
+                log.exception("❌ Failed to fetch channel")
+                return
+
+        msg = (
+            f"📈 **AI Signal — {result.get('symbol','?')}**\n\n"
+            f"**Action:** {result.get('action')}\n"
+            f"**Side:** {result.get('side')}\n"
+            f"**Probability:** {result.get('probability')}%\n"
+            f"**Entry:** {result.get('entry')}\n"
+            f"**Stop:** {result.get('stop')}\n"
+            f"**Targets:** {result.get('targets')}\n\n"
+            f"{result.get('notes')}"
+        )
+
+        log.info("📤 Sending to Discord:")
+        log.info(msg)
+
+        await channel.send(msg)
