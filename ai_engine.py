@@ -180,4 +180,8 @@ Payload:
             f"{result.get('notes')}"
         )
 
+
+        log.info("📤 Sending to Discord:")
+log.info(msg)
+
         await channel.send(msg)
