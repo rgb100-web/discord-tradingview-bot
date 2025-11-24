@@ -1,0 +1,6 @@
+{
+  "watchlist": ["QQQ","SPY","AAPL","META","TSLA"],
+  "avoid_time_windows": [{"start":"12:00","end":"13:30","tz":"US/Eastern"}],
+  "min_probability": 60,
+  "min_rr": 3
+}
