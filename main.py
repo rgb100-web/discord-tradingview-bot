@@ -1,4 +1,3 @@
-# main.py
 import os
 import asyncio
 import logging
@@ -17,9 +16,10 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-ai = AIEngine(bot=bot, channel_id=DISCORD_CHANNEL_ID)  # AIEngine will post to discord
+ai = AIEngine(bot=bot, channel_id=DISCORD_CHANNEL_ID)
 
-@app := create_app(ai)  # create Flask app with webhook route
+app = create_app(ai)  # <-- FIXED
+
 
 @bot.event
 async def on_ready():
@@ -45,3 +45,4 @@ def run_bot_and_server():
 
 if __name__ == "__main__":
     run_bot_and_server()
+
