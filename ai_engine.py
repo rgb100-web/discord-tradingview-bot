@@ -2,146 +2,182 @@
 import os
 import asyncio
 import logging
-import time
 import json
-import requests
+import aiohttp
 
 log = logging.getLogger("ai_engine")
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-# Model names are placeholders — use your vendor/model strings
-MODEL_FAST = os.getenv("FAST_MODEL", "gpt-4.1-mini")
-MODEL_DEEP = os.getenv("DEEP_MODEL", "gpt-5.1")
+FAST_MODEL = os.getenv("FAST_MODEL", "gpt-4.1-mini")    # Fast filter model
+DEEP_MODEL = os.getenv("DEEP_MODEL", "gpt-4.1")         # Final reasoning model
 
 class AIEngine:
-    def __init__(self, bot=None, channel_id=0):
+    """
+    Handles AI evaluation pipeline:
+    1) Payload queued from webhook
+    2) Fast model determines pass/fail
+    3) Deep model produces probability, entry, stop, targets, notes
+    4) Sends formatted results to Discord channel
+    """
+
+    def __init__(self, bot=None, channel_id=None):
         self.bot = bot
         self.channel_id = int(channel_id) if channel_id else None
         self.queue = asyncio.Queue()
-        # spawn background worker
+
+        # Start the worker loop inside Discord's event loop
         loop = asyncio.get_event_loop()
         loop.create_task(self._worker())
 
+    # 🔥 SAFE QUEUEING FIX (prevents "no event loop in thread" error)
     def enqueue(self, payload: dict):
-        """Called by webhook to queue payload for evaluation."""
-        def enqueue(self, payload: dict):
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-    loop.call_soon_threadsafe(self.queue.put_nowait, payload)
+        """Called by webhook thread to safely queue payload to async loop."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
 
+        loop.call_soon_threadsafe(self.queue.put_nowait, payload)
 
     async def _worker(self):
+        """Processes payloads one at a time."""
         while True:
             payload = await self.queue.get()
             try:
-                result = await self.evaluate_payload(payload)
-                await self.post_result(result)
+                decision = await self.evaluate_payload(payload)
+                await self.post_to_discord(decision)
             except Exception as e:
-                log.exception("Error processing payload")
+                log.exception(f"❌ AIEngine processing error: {e}")
             finally:
                 self.queue.task_done()
 
     async def evaluate_payload(self, payload: dict) -> dict:
         """
-        1) Run fast filter with gpt-4.1-mini (quick reject/accept)
-        2) If passes, run gpt-5.1 for deep reasoning & probability
-        3) Return a structured dict with verdict, entry/stop/targets, probability, notes
+        Fast model (filter) → Deep model (analysis)
+        Returns a final structured dict.
         """
-        # Basic local heuristic filter (fast)
-        if payload.get("volume", 0) and payload.get("volume") < payload.get("volMA", 0) * 0.8:
-            return {"action":"reject","reason":"low volume"}
 
-        # Compose prompts (short example). Adapt to your API shape.
-        base_context = self._format_payload(payload)
-
-        # FAST model quick pass
-        fast_resp = self._call_openai(MODEL_FAST, prompt=f"Quick filter. Payload: {base_context}\nAnswer in JSON: {{'pass': bool, 'reason': str}}")
-        try:
-            fast_json = json.loads(fast_resp)
-        except Exception:
-            fast_json = {"pass": True}
-
-        if not fast_json.get("pass", True):
-            return {"action":"reject","reason": fast_json.get("reason","fast check failed")}
-
-        # Deep reasoning
-        deep_prompt = self._deep_prompt(payload)
-        deep_resp = self._call_openai(MODEL_DEEP, prompt=deep_prompt)
-        # Expect JSON response from model. This is a simplified approach.
-        try:
-            decision = json.loads(deep_resp)
-        except Exception:
-            # fallback: minimal parsing
-            decision = {
+        # ⏳ If no API key → output stub so alerts still test cleanly
+        if not OPENAI_API_KEY:
+            return {
+                "symbol": payload.get("symbol"),
                 "action": "suggest",
                 "side": "long",
-                "probability": 0.6,
+                "probability": 67,
                 "entry": payload.get("price"),
-                "stop": payload.get("price",0) - payload.get("atr",0)*1.5,
-                "targets": [payload.get("price",0) + 3*(payload.get("atr",0)*1.5)]
+                "stop": round(payload.get("price", 0) - payload.get("atr", 1) * 1.5, 2),
+                "targets": [round(payload.get("price", 0) + payload.get("atr", 1) * 4.5, 2)],
+                "notes": "AI key missing — using stub response."
             }
-        return decision
 
-    def _format_payload(self, payload):
-        # compact readable text for prompts
-        return json.dumps(payload, default=str)
+        # ----------- Fast Filter (GPT-4.1-mini) -----------
+        fast_prompt = f"""
+Analyze the following market snapshot. Decide if it is worth evaluating further.
+Return ONLY JSON:
+{{"pass": true/false, "reason": ""}}
 
-    def _deep_prompt(self, payload):
-        # Build a structured prompt instructing the model to return JSON with fields:
-        # action (suggest/reject), side, probability (0-100), entry, stop, targets[], notes
-        p = {
-            "system": "You are a professional trading analyst. Return a JSON object only.",
-            "payload": payload,
-            "rules": {
-                "min_probability": 60,
-                "min_rr": 3
+Payload:
+{json.dumps(payload)}
+"""
+        fast_result = await self._call_openai(FAST_MODEL, fast_prompt)
+        try:
+            fast_json = json.loads(fast_result)
+            if not fast_json.get("pass", True):
+                return {
+                    "symbol": payload.get("symbol"),
+                    "action": "reject",
+                    "reason": fast_json.get("reason", "Fast filter rejected setup.")
+                }
+        except Exception:
+            pass  # continue to deep reasoning if json parsing fails
+
+        # ----------- Deep Reasoning (GPT-4.1) -----------
+        deep_prompt = f"""
+You are an elite trading analyst. Evaluate the trade using:
+- probability of success
+- risk/reward >= 1:3
+- trend, momentum, volume, volatility, divergences
+- clean entry, stop, 1–2 targets
+
+Return ONLY JSON with fields:
+{{
+  "symbol": "",
+  "action": "suggest" or "reject",
+  "side": "long" or "short",
+  "probability": 0–100,
+  "entry": float,
+  "stop": float,
+  "targets": [float, float?],
+  "notes": ""
+}}
+
+Payload:
+{json.dumps(payload)}
+"""
+        deep_result = await self._call_openai(DEEP_MODEL, deep_prompt)
+        try:
+            final_json = json.loads(deep_result)
+            return final_json
+        except Exception:
+            log.warning("⚠ Deep model returned non-JSON — falling back")
+            return {
+                "symbol": payload.get("symbol"),
+                "action": "suggest",
+                "side": "long",
+                "probability": 60,
+                "entry": payload.get("price"),
+                "stop": round(payload.get("price", 0) - payload.get("atr", 1) * 1.5, 2),
+                "targets": [round(payload.get("price", 0) + payload.get("atr", 1) * 4.5, 2)],
+                "notes": "Fallback — model returned non-JSON format."
             }
+
+    async def _call_openai(self, model: str, prompt: str) -> str:
+        """OpenAI chat completions request → returns raw content string."""
+        url = "https://api.openai.com/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {OPENAI_API_KEY}",
+            "Content-Type": "application/json"
         }
-        return json.dumps(p)
-
-    def _call_openai(self, model, prompt):
-        """
-        Minimal OpenAI-compatible REST call (adjust for your provider)
-        This uses OPENAI_API_KEY env var and expects text response.
-        Replace with your provider SDK as needed.
-        """
-        if not OPENAI_API_KEY:
-            log.warning("OPENAI_API_KEY missing — returning stubbed response.")
-            # Return a minimal JSON string that will be parsed by caller
-            return json.dumps({"action":"suggest","side":"long","probability":67,"entry":prompt, "stop":0,"targets":[]})
-        url = "https://api.openai.com/v1/responses"  # placeholder endpoint; change if different
-        headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type":"application/json"}
         body = {
             "model": model,
-            "input": prompt,
+            "messages": [
+                {"role": "system", "content": "You are a precise trading analysis engine."},
+                {"role": "user", "content": prompt}
+            ],
+            "temperature": 0.1,
             "max_tokens": 800
         }
-        resp = requests.post(url, headers=headers, json=body, timeout=30)
-        resp.raise_for_status()
-        # provider may return content in different shape; for safety, return text
-        return resp.text
 
-    async def post_result(self, result: dict):
-        """Post formatted result to Discord channel via bot."""
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, headers=headers, json=body) as r:
+                response = await r.json()
+                return response["choices"][0]["message"]["content"]
+
+    async def post_to_discord(self, result: dict):
+        """Send formatted AI recommendation to the configured Discord channel."""
         if not self.bot or not self.channel_id:
-            log.info("No bot/channel configured; printing result:\n%s", result)
+            log.warning("⚠ No bot or channel configured — printing fallback")
+            print(result)
             return
 
         channel = self.bot.get_channel(self.channel_id)
         if channel is None:
-            # sometimes channel not ready; fetch via API
             try:
                 channel = await self.bot.fetch_channel(self.channel_id)
             except Exception:
-                log.warning("Could not fetch channel")
+                log.exception("❌ Cannot fetch Discord channel")
                 return
 
-        # Format embed-friendly summary
-        title = f"AI Signal — {result.get('symbol','?')}"
-        desc = result.get("notes") or result.get("reason") or "No notes"
-        prob = result.get("probability")
-        content = f"**Action:** {result.get('action')}\n**Side:** {result.get('side')}\n**Probability:** {prob}%\n**Entry:** {result.get('entry')}\n**Stop:** {result.get('stop')}\n**Targets:** {result.get('targets')}\n\n{desc}"
-        await channel.send(content)
+        msg = (
+            f"📈 **AI Signal — {result.get('symbol','?')}**\n\n"
+            f"**Action:** {result.get('action')}\n"
+            f"**Side:** {result.get('side')}\n"
+            f"**Probability:** {result.get('probability')}%\n"
+            f"**Entry:** {result.get('entry')}\n"
+            f"**Stop:** {result.get('stop')}\n"
+            f"**Targets:** {result.get('targets')}\n\n"
+            f"{result.get('notes')}"
+        )
+
+        await channel.send(msg)
