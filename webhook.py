@@ -1,29 +1,33 @@
 # webhook.py
-from flask import Flask, request, jsonify
 import logging
+from flask import Flask, request, jsonify
+from threading import Thread
 
 log = logging.getLogger("webhook")
 
 def create_app(ai_engine):
     app = Flask(__name__)
 
-    @app.route("/", methods=["GET"])
-    def home():
-        return "Trading AI Bot Running", 200
-
     @app.route("/webhook", methods=["POST"])
     def webhook():
         try:
             payload = request.get_json(force=True)
+
+            # Push alert to AI queue
+            ai_engine.queue.put(payload)
+            log.info(f"Webhook received and queued: {payload}")
+
+            return jsonify({"status": "queued"}), 202
+
         except Exception as e:
-            log.error("❌ JSON parse error")
-            log.exception(e)
-            return jsonify({"error": "Invalid JSON"}), 400
+            log.exception("Webhook error")
+            return jsonify({
+                "status": "error",
+                "message": str(e)
+            }), 500
 
-        if not isinstance(payload, dict):
-            return jsonify({"error": "Webhook payload must be JSON object"}), 400
-
-        ai_engine.enqueue(payload)
-        return jsonify({"status": "queued"}), 202
+    @app.route("/", methods=["GET"])
+    def root():
+        return "Discord TradingView Bot is running", 200
 
     return app
