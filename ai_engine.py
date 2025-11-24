@@ -24,7 +24,14 @@ class AIEngine:
 
     def enqueue(self, payload: dict):
         """Called by webhook to queue payload for evaluation."""
-        asyncio.get_event_loop().call_soon_threadsafe(self.queue.put_nowait, payload)
+        def enqueue(self, payload: dict):
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    loop.call_soon_threadsafe(self.queue.put_nowait, payload)
+
 
     async def _worker(self):
         while True:
