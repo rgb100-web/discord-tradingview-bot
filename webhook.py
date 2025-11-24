@@ -1,9 +1,9 @@
 # webhook.py
 import logging
 from flask import Flask, request, jsonify
-from threading import Thread
 
 log = logging.getLogger("webhook")
+
 
 def create_app(ai_engine):
     app = Flask(__name__)
@@ -12,19 +12,18 @@ def create_app(ai_engine):
     def webhook():
         try:
             payload = request.get_json(force=True)
+            if not isinstance(payload, dict):
+                raise ValueError("Payload must be a JSON object")
 
-            # Push alert to AI queue
-            ai_engine.queue.put(payload)
+            # Hand off to AI engine queue
+            ai_engine.enqueue_alert(payload)
             log.info(f"Webhook received and queued: {payload}")
 
             return jsonify({"status": "queued"}), 202
 
         except Exception as e:
             log.exception("Webhook error")
-            return jsonify({
-                "status": "error",
-                "message": str(e)
-            }), 500
+            return jsonify({"status": "error", "message": str(e)}), 500
 
     @app.route("/", methods=["GET"])
     def root():
