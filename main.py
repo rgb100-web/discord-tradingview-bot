@@ -1,3 +1,10 @@
+ai = AIEngine(bot=bot, channel_id=DISCORD_CHANNEL_ID)
+
+@bot.event
+async def on_ready():
+    print(f"Bot logged in as {bot.user} (id:{bot.user.id})")
+    asyncio.create_task(ai._worker())   # <-- start queue here
+
 import os
 import asyncio
 import logging
