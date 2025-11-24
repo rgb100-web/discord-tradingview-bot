@@ -1,6 +1,7 @@
 discord.py
 flask
-aiohttp
-requests
 waitress
+requests
 nest-asyncio
+aiohttp
+openai==1.59.3
