@@ -35,6 +35,10 @@ async def on_ready():
 @bot.command()
 async def ping(ctx):
     await ctx.send("Pong! Bot is online.")
+@bot.command()
+async def test(ctx):
+    ai.enqueue_alert("TEST / WORKER CHECK")
+    await ctx.send("Test alert queued")
 
 
 # ---- FLASK / WEBHOOK SERVER ----
